@@ -1,56 +1,124 @@
 #include <stdio.h>
+#include <winsock2.h>
+#include <windows.h>
+#include <ws2tcpip.h>
 #include <stdlib.h>
-#include <string.h>
-#include <netinet/in.h>
-#include <unistd.h>
 
-#define PORT 8080
+#define DEFAULT_PORT "27015"
+#define DEFAULT_BUFLEN 512
 
 int main() {
-    int client_socket;
-    struct sockaddr_in server_address;
-    char buffer[1024];
+    WSADATA wsaData;
+    int iResult;
 
-    // Create socket
-    client_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (client_socket == -1) {
-        perror("Error creating socket");
-        exit(EXIT_FAILURE);
+    SOCKET client_socket = INVALID_SOCKET;
+    struct addrinfo *result = NULL, *ptr = NULL, hints;
+    char sendbuf[DEFAULT_BUFLEN];
+    char recvbuf[DEFAULT_BUFLEN];
+    int iSendResult;
+    int recvbuflen = DEFAULT_BUFLEN;
+
+    // Initialize Winsock
+    iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (iResult != 0) {
+        printf("WSAStartup failed with error: %d\n", iResult);
+        return 1;
     }
 
-    // Initialize server address struct
-    server_address.sin_family = AF_INET;
-    server_address.sin_port = htons(PORT);
+    ZeroMemory(&hints, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
 
-    // Convert IPv4 and IPv6 addresses from text to binary form
-    if (inet_pton(AF_INET, "127.0.0.1", &server_address.sin_addr) <= 0) {
-        perror("Invalid address/ Address not supported");
-        exit(EXIT_FAILURE);
+    // Resolve the server address and port
+    iResult = getaddrinfo("127.0.0.1", DEFAULT_PORT, &hints, &result);
+    if (iResult != 0) {
+        printf("getaddrinfo failed with error: %d\n", iResult);
+        WSACleanup();
+        return 1;
     }
 
-    // Connect to the server
-    if (connect(client_socket, (struct sockaddr*)&server_address, sizeof(server_address)) == -1) {
-        perror("Error connecting to server");
-        exit(EXIT_FAILURE);
+    // Attempt to connect to the first address returned by
+    // the call to getaddrinfo
+    for (ptr = result; ptr != NULL; ptr = ptr->ai_next) {
+        // Create a SOCKET for connecting to server
+        client_socket = socket(ptr->ai_family, ptr->ai_socktype, ptr->ai_protocol);
+        if (client_socket == INVALID_SOCKET) {
+            printf("socket failed with error: %ld\n", WSAGetLastError());
+            WSACleanup();
+            return 1;
+        }
+
+        // Connect to server
+        iResult = connect(client_socket, ptr->ai_addr, (int)ptr->ai_addrlen);
+        if (iResult == SOCKET_ERROR) {
+            closesocket(client_socket);
+            client_socket = INVALID_SOCKET;
+            continue;
+        }
+        break;
     }
 
-    // Receive and display questions, send answers
-    for (int i = 0; i < 4; ++i) {
-        // Receive and display the question
-        recv(client_socket, buffer, sizeof(buffer), 0);
-        printf("%s", buffer);
+    freeaddrinfo(result);
 
-        // Get user input and send the answer
-        fgets(buffer, sizeof(buffer), stdin);
-        send(client_socket, buffer, strlen(buffer), 0);
+    if (client_socket == INVALID_SOCKET) {
+        printf("Unable to connect to server!\n");
+        WSACleanup();
+        return 1;
     }
 
-    // Receive and display luck determination
-    recv(client_socket, buffer, sizeof(buffer), 0);
-    printf("%s", buffer);
+    int tryAgain = 1;
+
+    while (tryAgain) {
+        // Receive and display questions, send answers
+        for (int i = 0; i < 4; ++i) {
+            // Receive and display the question
+            iResult = recv(client_socket, recvbuf, sizeof(recvbuf), 0);
+            if (iResult > 0) {
+                recvbuf[iResult] = '\0';  // Null-terminate the received data
+                printf("%s", recvbuf);
+            } else {
+                printf("recv failed with error: %d\n", WSAGetLastError());
+                break;
+            }
+
+            // Get user input and send the answer
+            printf("Enter your answer (1-5): ");
+            fgets(sendbuf, sizeof(sendbuf), stdin);
+            iSendResult = send(client_socket, sendbuf, strlen(sendbuf), 0);
+            if (iSendResult == SOCKET_ERROR) {
+                printf("send failed with error: %d\n", WSAGetLastError());
+                break;
+            }
+        }
+
+        // Receive and display luck determination
+        iResult = recv(client_socket, recvbuf, sizeof(recvbuf), 0);
+        if (iResult > 0) {
+            recvbuf[iResult] = '\0';  // Null-terminate the received data
+            printf("%s", recvbuf);
+        } else {
+            printf("recv failed with error: %d\n", WSAGetLastError());
+        }
+
+        // Ask if the user wants to try again
+        printf("Do you want to try again? (1 for yes, 0 for no): ");
+        fgets(sendbuf, sizeof(sendbuf), stdin);
+
+        // Convert the input to an integer
+        tryAgain = atoi(sendbuf);
+
+        // Send the tryAgain status to the server
+        iSendResult = send(client_socket, sendbuf, strlen(sendbuf), 0);
+        if (iSendResult == SOCKET_ERROR) {
+            printf("send failed with error: %d\n", WSAGetLastError());
+            break;
+        }
+    }
 
     // Close the socket
-    close(client_socket);
+    closesocket(client_socket);
+    WSACleanup();
 
     return 0;
 }
