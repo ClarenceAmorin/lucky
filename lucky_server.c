@@ -1,96 +1,143 @@
 #include <stdio.h>
+#include <winsock2.h>
+#include <windows.h>
+#include <ws2tcpip.h>
 #include <stdlib.h>
-#include <string.h>
-#include <netinet/in.h>
-#include <unistd.h>
 
-#define PORT 8080
-#define MAX_QUESTION_SCORE 5
+#define DEFAULT_PORT "27015"
+#define DEFAULT_BUFLEN 512
 
-void handle_client(int client_socket);
+void handle_client(SOCKET client_socket);
 
 int main() {
-    int server_socket, client_socket;
-    struct sockaddr_in server_address, client_address;
-    socklen_t client_addr_len = sizeof(client_address);
+    WSADATA wsaData;
+    int iResult;
 
-    // Create socket
-    server_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_socket == -1) {
-        perror("Error creating socket");
-        exit(EXIT_FAILURE);
+    SOCKET ListenSocket = INVALID_SOCKET;
+    SOCKET ClientSocket = INVALID_SOCKET;
+
+    struct addrinfo *result = NULL;
+    struct addrinfo hints;
+
+    // Initialize Winsock
+    iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (iResult != 0) {
+        printf("WSAStartup failed with error: %d\n", iResult);
+        return 1;
     }
 
-    // Initialize server address struct
-    server_address.sin_family = AF_INET;
-    server_address.sin_addr.s_addr = INADDR_ANY;
-    server_address.sin_port = htons(PORT);
+    ZeroMemory(&hints, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    hints.ai_flags = AI_PASSIVE;
 
-    // Bind the socket
-    if (bind(server_socket, (struct sockaddr*)&server_address, sizeof(server_address)) == -1) {
-        perror("Error binding socket");
-        exit(EXIT_FAILURE);
+    // Resolve the server address and port
+    iResult = getaddrinfo(NULL, DEFAULT_PORT, &hints, &result);
+    if (iResult != 0) {
+        printf("getaddrinfo failed with error: %d\n", iResult);
+        WSACleanup();
+        return 1;
     }
 
-    // Listen for incoming connections
-    if (listen(server_socket, 5) == -1) {
-        perror("Error listening for connections");
-        exit(EXIT_FAILURE);
+    // Create a SOCKET for the server to listen for client connections.
+    ListenSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+    if (ListenSocket == INVALID_SOCKET) {
+        printf("socket failed with error: %ld\n", WSAGetLastError());
+        freeaddrinfo(result);
+        WSACleanup();
+        return 1;
     }
 
-    printf("Server listening on port %d...\n", PORT);
+    // Setup the TCP listening socket
+    iResult = bind(ListenSocket, result->ai_addr, (int)result->ai_addrlen);
+    if (iResult == SOCKET_ERROR) {
+        printf("bind failed with error: %d\n", WSAGetLastError());
+        freeaddrinfo(result);
+        closesocket(ListenSocket);
+        WSACleanup();
+        return 1;
+    }
 
-    while (1) {
-        // Accept a connection
-        client_socket = accept(server_socket, (struct sockaddr*)&client_address, &client_addr_len);
-        if (client_socket == -1) {
-            perror("Error accepting connection");
-            continue;
-        }
+    freeaddrinfo(result);
 
+    iResult = listen(ListenSocket, SOMAXCONN);
+    if (iResult == SOCKET_ERROR) {
+        printf("listen failed with error: %d\n", WSAGetLastError());
+        closesocket(ListenSocket);
+        WSACleanup();
+        return 1;
+    }
+
+    // Accept a client socket
+    ClientSocket = accept(ListenSocket, NULL, NULL);
+    if (ClientSocket == INVALID_SOCKET) {
+        printf("accept failed with error: %d\n", WSAGetLastError());
+        closesocket(ListenSocket);
+        WSACleanup();
+        return 1;
+    }
+
+    // No longer need the server socket
+    closesocket(ListenSocket);
+
+    int tryAgain = 1;
+
+    while (tryAgain) {
         // Handle the client
-        handle_client(client_socket);
+        handle_client(ClientSocket);
 
-        // Close the client socket
-        close(client_socket);
+        // Receive the tryAgain status from the client
+        char recvbuf[DEFAULT_BUFLEN];
+        iResult = recv(ClientSocket, recvbuf, sizeof(recvbuf), 0);
+
+        if (iResult > 0) {
+            recvbuf[iResult] = '\0';  // Null-terminate the received data
+
+            // Convert the received data to an integer
+            tryAgain = atoi(recvbuf);
+        } else {
+            printf("recv failed with error: %d\n", WSAGetLastError());
+            break;
+        }
     }
 
-    // Close the server socket
-    close(server_socket);
+    // Shutdown and cleanup
+    closesocket(ClientSocket);
+    WSACleanup();
 
     return 0;
 }
 
-void handle_client(int client_socket) {
-    char buffer[1024];
+void handle_client(SOCKET client_socket) {
+    char recvbuf[DEFAULT_BUFLEN];
+    int iResult;
     int score = 0;
 
-    // Sample questions
     const char* questions[] = {
-        "What is the capital of France? (1-5)\n",
-        "In which year did World War II end? (1-5)\n",
-        "How many continents are there? (1-5)\n",
-        "What is the square root of 25? (1-5)\n"
+        "How was your day? (1-5)\n",
+        "How often do you experience what you consider lucky events? (1-5)\n",
+        "Have you ever made a decision that turned out to be exceptionally lucky? (1-5)\n",
+        "To what extent do you believe luck plays a role in your life? (1-5)\n"
     };
 
-    // Ask four questions
-    for (int i = 0; i < 4; ++i) {
-        // Send the question
+for (int i = 0; i < 4; ++i) {
         send(client_socket, questions[i], strlen(questions[i]), 0);
+        iResult = recv(client_socket, recvbuf, sizeof(recvbuf), 0);
 
-        // Receive the answer
-        recv(client_socket, buffer, sizeof(buffer), 0);
-        int answer = atoi(buffer);
-
-        // Validate the answer
-        if (answer >= 1 && answer <= 5) {
-            score += answer;
+        if (iResult > 0) {
+            int answer = atoi(recvbuf);
+            if (answer >= 1 && answer <= 5) {
+                score += answer;
+            } else {
+                printf("Invalid answer received. Ignoring.\n");
+            }
         } else {
-            printf("Invalid answer received. Ignoring.\n");
+            printf("recv failed with error: %d\n", WSAGetLastError());
+            break;
         }
     }
 
-    // Determine luck based on the total score
     if (score <= 8) {
         send(client_socket, "You have bad luck today.\n", 26, 0);
     } else if (score <= 12) {
